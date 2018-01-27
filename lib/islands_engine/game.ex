@@ -1,14 +1,16 @@
 defmodule IslandsEngine.Game do
   alias IslandsEngine.{Board, Coordinate, Guesses, Island, Rules}
-  use GenServer
+  use GenServer, start: {__MODULE__, :start_link, []}, restart: :transient
+
+  @timeout 1000 * 60 * 30
 
   @players [:player1, :player2]
+
+  def via_tuple(name), do: {:via, Registry, {Registry.Game, name}}
 
   def start_link(name) when is_binary(name) do
     GenServer.start_link(__MODULE__, name, name: via_tuple(name))
   end
-
-  def via_tuple(name), do: {:via, Registry, {Registry.Game, name}}
 
   def add_player(game, name) when is_binary(name) do
     GenServer.call(game, {:add_player, name})
@@ -31,9 +33,42 @@ defmodule IslandsEngine.Game do
   ### Callbacks
 
   def init(name) do
+    # Don't initialize data from ets on init because init blocks, and this could
+    # very eventually end up being a bottleneck.
+    # do it afterwards.
+    send(self(), {:set_state, name})
+    # it's important to note that ^^ could cause a race condition if messages have queued up
+    # in the process mailbox before :set_state, which is slightly possible since we use a :via tuple
+    # to register the pid
+    {:ok, fresh_state(name)}
+  end
+
+  def handle_info({:set_state, name}, _state) do
+    state_data =
+      case :ets.lookup(:game_state, name) do
+        [] -> fresh_state(name)
+        [{_key, state}] -> state
+      end
+
+    :ets.insert(:game_state, {name, state_data})
+    {:noreply, state_data, @timeout}
+  end
+
+  def handle_info(:timeout, state) do
+    {:stop, {:shutdown, :timeout}, state}
+  end
+
+  def terminate({:shutdown, :timeout}, state_data) do
+    :ets.delete(:game_state, state_data.player1.name)
+    :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
+
+  defp fresh_state(name) do
     player1 = %{name: name, board: Board.new(), guesses: Guesses.new()}
-    player2 = %{name: name, board: Board.new(), guesses: Guesses.new()}
-    {:ok, %{player1: player1, player2: player2, rules: %Rules{}}}
+    player2 = %{name: nil, board: Board.new(), guesses: Guesses.new()}
+    %{player1: player1, player2: player2, rules: %Rules{}}
   end
 
   def handle_call({:add_player, name}, _from, state) do
@@ -123,5 +158,8 @@ defmodule IslandsEngine.Game do
 
   defp update_rules(state, rules), do: %{state | rules: rules}
 
-  defp reply_success(state, reply), do: {:reply, reply, state}
+  defp reply_success(state, reply) do
+    :ets.insert(:game_state, {state.player1.name, state})
+    {:reply, reply, state, @timeout}
+  end
 end
