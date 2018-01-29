@@ -23,7 +23,7 @@ defmodule IslandsEngine.Island do
   iex> match?({:hit, _}, guess(island, c))
   true
   """
-  def guess(island, coordinate) do
+  def guess(island, %Coordinate{} = coordinate) do
     case MapSet.member?(island.coordinates, coordinate) do
       true ->
         hit_coordinates = MapSet.put(island.hit_coordinates, coordinate)
